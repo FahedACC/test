@@ -2,10 +2,10 @@
 import os
 import logging
 from functools import lru_cache
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -52,7 +52,139 @@ def get_pudu_client(settings: Settings = Depends(get_settings)) -> PuduClient:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------- Shared Swagger helpers ---------- #
+
+LANGUAGE_HEADER_DESC = (
+    "Optional response language. If omitted, Pudu defaults to Chinese.\n\n"
+    "Header name must be exactly `Language`.\n"
+    "Supported values depend on Pudu tenant; see Pudu appendix."
+)
+
+
 # ---------- Pydantic request models for Swagger ---------- #
+
+class StoreMapListResponseItem(BaseModel):
+    map_name: str = Field(..., description="Map name under the shop.")
+
+
+class DeliveryMapInfo(BaseModel):
+    map_name: str = Field(
+        ...,
+        description="Map name that the destination point belongs to.",
+        example="Restaurant-1F",
+    )
+
+
+class DeliveryDestination(BaseModel):
+    destination: str = Field(
+        ...,
+        description='Delivery destination point name (formerly called "points").',
+        example="TABLE-001",
+    )
+    id: Optional[str] = Field(
+        None,
+        description=(
+            "Order / business id. Pudu docs say it can be omitted, but may also be required "
+            "depending on the robot / tenant. If you have a business order id, put it here."
+        ),
+        example="DELIVERY-001",
+    )
+    phone_num: Optional[str] = Field(
+        None,
+        description="Phone number (optional).",
+        example="13800138000",
+    )
+    phone_code: Optional[str] = Field(
+        None,
+        description="Phone country/area code (optional).",
+        example="+86",
+    )
+    map_info: Optional[DeliveryMapInfo] = Field(
+        None,
+        description="Optional map context if needed (map_name).",
+    )
+
+
+class DeliveryTray(BaseModel):
+    destinations: List[DeliveryDestination] = Field(
+        ...,
+        description="List of delivery targets for this tray.",
+        min_items=1,
+    )
+
+
+DeliveryType = Literal["NEW", "MODIFY"]
+DeliverySort = Literal["AUTO", "FIXED"]
+
+
+class DeliveryTaskPayload(BaseModel):
+    type: DeliveryType = Field(
+        ...,
+        description=(
+            "Task mode:\n"
+            "- NEW: create a new delivery task (shows on edit page)\n"
+            "- MODIFY: forcibly modify the current delivery task while robot is executing one"
+        ),
+        example="NEW",
+    )
+    delivery_sort: DeliverySort = Field(
+        ...,
+        description=(
+            "Destination ordering:\n"
+            "- AUTO: robot sorts by nearest\n"
+            "- FIXED: keep the order you provide"
+        ),
+        example="AUTO",
+    )
+    execute_task: bool = Field(
+        ...,
+        description=(
+            "Whether the robot should execute immediately:\n"
+            "- true: execute directly after receiving\n"
+            "- false: task is created but must be started manually on robot UI "
+            'or via DeliveryAction action="START".'
+        ),
+        example=True,
+    )
+    trays: List[DeliveryTray] = Field(
+        ...,
+        description="Trays list (multi-tray delivery).",
+        min_items=1,
+    )
+
+
+class DeliveryTaskBody(BaseModel):
+    sn: str = Field(..., description="Robot serial number.", example="SN-PD202405000001")
+    payload: DeliveryTaskPayload = Field(..., description="Delivery task parameters.")
+
+
+DeliveryActionEnum = Literal[
+    "START",
+    "COMPLETE",
+    "CANCEL_ALL_DELIVERY",
+    "PAUSE",
+    "RESUME",
+]
+
+
+class DeliveryActionPayload(BaseModel):
+    action: DeliveryActionEnum = Field(
+        ...,
+        description=(
+            "Delivery operation command:\n"
+            "- START: start the delivery task (effective on delivery task interface)\n"
+            "- COMPLETE: complete current delivery (only effective when arrival screen is displayed)\n"
+            "- CANCEL_ALL_DELIVERY: cancel all delivery tasks (only valid during execution)\n"
+            "- PAUSE: pause current delivery task (currently only supported by T300)\n"
+            "- RESUME: resume a paused delivery task (currently only supported by T300)"
+        ),
+        example="START",
+    )
+
+
+class DeliveryActionBody(BaseModel):
+    sn: str = Field(..., description="Robot serial number.", example="SN-PD202405000001")
+    payload: DeliveryActionPayload = Field(..., description="Operation command parameters.")
 
 
 class TaskErrandBody(BaseModel):
@@ -148,7 +280,6 @@ class GenericBody(BaseModel):
 
 # ---------- Callback models (notifyRobotPose) ---------- #
 
-
 class RobotPoseData(BaseModel):
     x: float = Field(..., description="X coordinate")
     y: float = Field(..., description="Y coordinate")
@@ -177,7 +308,7 @@ class RobotPoseCallback(BaseModel):
 
 app = FastAPI(
     title="Pudu Cloud – API Wrapper",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Thin FastAPI wrapper around Pudu Cloud for the trash cleaning / BellaBot use case.\n\n"
         "All `/pudu/...` endpoints proxy to Pudu Cloud with proper HMAC-SHA1 signing.\n"
@@ -201,7 +332,6 @@ async def shutdown_event() -> None:
 
 # ---------- Local health endpoint ---------- #
 
-
 @app.get(
     "/healthz",
     tags=["Internal"],
@@ -213,7 +343,6 @@ async def healthz() -> dict:
 
 
 # ---------- Pudu Health ---------- #
-
 
 @app.get(
     "/pudu/health",
@@ -228,10 +357,14 @@ async def healthz() -> dict:
     ),
 )
 async def pudu_health(
+    Language: Optional[str] = Header(  # noqa: N803
+        default=None,
+        description=LANGUAGE_HEADER_DESC,
+    ),
     client: PuduClient = Depends(get_pudu_client),
 ) -> JSONResponse:
     try:
-        result = await client.health_check()
+        result = await client.health_check(language=Language)
         return JSONResponse(content={"ok": True, "pudu_response": result})
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -241,23 +374,25 @@ async def pudu_health(
 
 # ---------- Robots (group & list) ---------- #
 
-
 @app.get(
     "/pudu/robot/groups",
     tags=["Robots"],
     summary="List robot groups",
     description=(
         "Proxy to `GET /open-platform-service/v1/robot/group/list`.\n\n"
-        "Returns the list of robot groups for the given `device` and/or `shop_id`."
+        "Query params:\n"
+        "- device (optional): device identifier\n"
+        "- shop_id (optional): shop scope\n"
     ),
 )
 async def list_robot_groups(
     device: Optional[str] = None,
     shop_id: Optional[str] = None,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.list_robot_groups(device=device, shop_id=shop_id)
+        return await client.list_robot_groups(device=device, shop_id=shop_id, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -268,34 +403,65 @@ async def list_robot_groups(
     summary="List robots in a group",
     description=(
         "Proxy to `GET /open-platform-service/v1/robot/list_by_device_and_group`.\n\n"
-        "Returns robots (SN, name, etc.) for a given `device` and `group_id`."
+        "Required query params:\n"
+        "- device: device identifier\n"
+        "- group_id: group identifier\n"
     ),
 )
 async def list_robots_by_device_and_group(
     device: str,
     group_id: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
         return await client.list_robots_by_device_and_group(
-            device=device, group_id=group_id
+            device=device, group_id=group_id, language=Language
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-# ---------- Maps & points ---------- #
+# ---------- Maps & points (existing + updated + new) ---------- #
+
+@app.get(
+    "/pudu/maps/store",
+    tags=["Maps"],
+    summary="StoreMapList: list all map names under a shop",
+    description=(
+        "Proxy to `GET /data-open-platform-service/v1/api/maps`.\n\n"
+        "Returns the list of map names configured under a **shop_id**.\n"
+        "This is not robot-specific; it is shop-level inventory.\n"
+    ),
+)
+async def store_map_list(
+    shop_id: int,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
+    try:
+        return await client.store_map_list(shop_id=shop_id, language=Language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get(
     "/pudu/maps",
     tags=["Maps"],
-    summary="List maps on a robot",
-    description="Proxy to `GET /map-service/v1/open/list`.",
+    summary="AvailableMaps: list maps currently available on the robot",
+    description=(
+        "Proxy to `GET /map-service/v1/open/list`.\n\n"
+        "Required query params:\n"
+        "- sn: robot serial number\n"
+    ),
 )
-async def list_maps(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def list_maps(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.list_maps(sn=sn)
+        return await client.list_maps(sn=sn, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -303,12 +469,47 @@ async def list_maps(sn: str, client: PuduClient = Depends(get_pudu_client)):
 @app.get(
     "/pudu/maps/current",
     tags=["Maps"],
-    summary="Get current map",
-    description="Proxy to `GET /map-service/v1/open/current`.",
+    summary="CurrentMap: get current robot map",
+    description=(
+        "Proxy to `GET /map-service/v1/open/current`.\n\n"
+        "Required query params:\n"
+        "- sn: robot serial number\n\n"
+        "Optional query params:\n"
+        "- need_element: when true, returns map elements (useful if rendering).\n"
+    ),
 )
-async def get_current_map(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def get_current_map(
+    sn: str,
+    need_element: Optional[bool] = None,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.get_current_map(sn=sn)
+        return await client.get_current_map(sn=sn, need_element=need_element, language=Language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get(
+    "/pudu/maps/detail-v2",
+    tags=["Maps"],
+    summary="GetMapDetailV2: get raw map details without unit conversion",
+    description=(
+        "Proxy to `GET /map-service/v1/open/map`.\n\n"
+        "Required query params:\n"
+        "- shop_id: shop id (string per Pudu spec)\n"
+        "- map_name: map name (URL-escaped if contains # or non-ASCII)\n\n"
+        "This endpoint outputs the robot map data as-is (no unit conversion)."
+    ),
+)
+async def get_map_detail_v2(
+    shop_id: str,
+    map_name: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
+    try:
+        return await client.get_map_detail_v2(shop_id=shop_id, map_name=map_name, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -316,18 +517,51 @@ async def get_current_map(sn: str, client: PuduClient = Depends(get_pudu_client)
 @app.get(
     "/pudu/maps/points",
     tags=["Maps"],
-    summary="List points of interest for current map",
-    description="Proxy to `GET /map-service/v1/open/point`.",
+    summary="GetCurrentMapPoints: list points of interest for current map",
+    description=(
+        "Proxy to `GET /map-service/v1/open/point`.\n\n"
+        "Required query params:\n"
+        "- sn: robot serial number\n"
+    ),
 )
-async def list_points(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def list_points(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.list_points(sn=sn)
+        return await client.list_points(sn=sn, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-# ---------- Missions / Tasks ---------- #
+# ---------- Robot position (NEW) ---------- #
 
+@app.get(
+    "/pudu/robot/position",
+    tags=["Status"],
+    summary="GetPosition: get robot current position on its map",
+    description=(
+        "Proxy to `GET /open-platform-service/v1/robot/get_position`.\n\n"
+        "Required query params:\n"
+        "- sn: robot serial number\n\n"
+        "Response includes:\n"
+        "- map_name, floor\n"
+        "- position {x,y,z}\n"
+    ),
+)
+async def get_robot_position(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
+    try:
+        return await client.get_robot_position(sn=sn, language=Language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------- Missions / Tasks (existing) ---------- #
 
 @app.post(
     "/pudu/missions/task-errand",
@@ -341,10 +575,11 @@ async def list_points(sn: str, client: PuduClient = Depends(get_pudu_client)):
 )
 async def create_task_errand(
     body: TaskErrandBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.create_task_errand(body.dict())
+        return await client.create_task_errand(body.dict(), language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -352,19 +587,21 @@ async def create_task_errand(
 @app.post(
     "/pudu/missions/transport-task",
     tags=["Missions"],
-    summary="Create a transport/delivery task",
+    summary="Create a transport/delivery task (legacy transport_task)",
     description=(
         "Proxy to `POST /open-platform-service/v1/transport_task`.\n\n"
         "Creates an advanced transport/delivery task "
-        "(start point, multiple destinations, priority, etc.)."
+        "(start point, multiple destinations, priority, etc.).\n\n"
+        "Note: Pudu also provides `delivery_task`/`delivery_action` APIs for delivery workflows."
     ),
 )
 async def create_transport_task(
     body: TransportTaskBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.create_transport_task(body.dict())
+        return await client.create_transport_task(body.dict(), language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -376,11 +613,18 @@ async def create_transport_task(
     description=(
         "Proxy to `POST /open-platform-service/v1/custom_call`.\n\n"
         "Calls the robot to a specific map point and optionally shows custom content "
-        "on the tablet (image, QR, video, confirmation, etc.)."
+        "on the tablet (image, QR, video, confirmation, etc.).\n\n"
+        "Body fields:\n"
+        "- sn (optional in wrapper model, may be required by your tenant)\n"
+        "- map_name (required)\n"
+        "- point (required)\n"
+        "- call_device_name (required)\n"
+        "- extra (optional): any additional Pudu fields (call_mode, mode_data, shop_id, etc.)"
     ),
 )
 async def custom_call(
     body: CustomCallBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     full_body: Dict[str, Any] = {
@@ -391,7 +635,7 @@ async def custom_call(
         **body.extra,
     }
     try:
-        return await client.custom_call(full_body)
+        return await client.custom_call(full_body, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -404,10 +648,11 @@ async def custom_call(
 )
 async def custom_call_cancel(
     body: CustomCallCancelBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.custom_call_cancel(body.dict())
+        return await client.custom_call_cancel(body.dict(), language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -424,16 +669,102 @@ async def custom_call_cancel(
 )
 async def custom_call_complete(
     body: CustomCallCompleteBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.custom_call_complete(body.dict())
+        return await client.custom_call_complete(body.dict(), language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-# ---------- Status & Position ---------- #
+# ---------- Call list (NEW) ---------- #
 
+@app.get(
+    "/pudu/calls",
+    tags=["Missions"],
+    summary="CallList: list call tasks for a robot",
+    description=(
+        "Proxy to `GET /open-platform-service/v1/call/list`.\n\n"
+        "Required query params:\n"
+        "- sn: robot serial number\n\n"
+        "Optional query params:\n"
+        "- limit: max items to return (example uses 10)\n\n"
+        "Response includes `total` and `list` of call tasks "
+        "(task_id, shop_id, map_name, point, queue, create_time, finish_time, status, remark, product_code...)."
+    ),
+)
+async def list_calls(
+    sn: str,
+    limit: Optional[int] = Field(default=10, ge=1, le=200, description="Max items to return."),
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
+    try:
+        return await client.list_calls(sn=sn, limit=limit, language=Language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------- Delivery (NEW) ---------- #
+
+@app.post(
+    "/pudu/delivery/task",
+    tags=["Delivery"],
+    summary="DeliveryTask: send a delivery task (multi-tray)",
+    description=(
+        "Proxy to `POST /open-platform-service/v1/delivery_task`.\n\n"
+        "Sends a delivery task to the robot, supporting multi-tray and delivery modes.\n"
+        "After initiating the task, you can subscribe to callback notifications for delivery status "
+        "(notifyDeliveryTask).\n\n"
+        "Key fields:\n"
+        "- payload.type: NEW | MODIFY\n"
+        "- payload.delivery_sort: AUTO | FIXED\n"
+        "- payload.execute_task: true | false\n"
+        "- payload.trays[].destinations[].destination: point name\n"
+        "- payload.trays[].destinations[].id: order id (may be optional per docs)\n"
+        "- payload.trays[].destinations[].phone_num / phone_code optional\n"
+        "- payload.trays[].destinations[].map_info.map_name optional\n"
+    ),
+)
+async def delivery_task(
+    body: DeliveryTaskBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
+    try:
+        return await client.delivery_task(body.dict(), language=Language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post(
+    "/pudu/delivery/action",
+    tags=["Delivery"],
+    summary="DeliveryAction: operate delivery tasks (start/complete/cancel/pause/resume)",
+    description=(
+        "Proxy to `POST /open-platform-service/v1/delivery_action`.\n\n"
+        "Prerequisite: ensure the robot is executing a delivery task.\n\n"
+        "Actions:\n"
+        "- START\n"
+        "- COMPLETE\n"
+        "- CANCEL_ALL_DELIVERY\n"
+        "- PAUSE (T300 only)\n"
+        "- RESUME (T300 only)\n"
+    ),
+)
+async def delivery_action(
+    body: DeliveryActionBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
+    try:
+        return await client.delivery_action(body.dict(), language=Language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------- Status & Position (existing) ---------- #
 
 @app.get(
     "/pudu/status/by-sn",
@@ -441,9 +772,13 @@ async def custom_call_complete(
     summary="Get status for one robot",
     description="Proxy to `GET /open-platform-service/v2/status/get_by_sn`.",
 )
-async def get_status_by_sn(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def get_status_by_sn(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.get_status_by_sn(sn=sn)
+        return await client.get_status_by_sn(sn=sn, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -456,10 +791,11 @@ async def get_status_by_sn(sn: str, client: PuduClient = Depends(get_pudu_client
 )
 async def get_status_by_group_id(
     group_id: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.get_status_by_group_id(group_id=group_id)
+        return await client.get_status_by_group_id(group_id=group_id, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -477,10 +813,11 @@ async def get_status_by_group_id(
 )
 async def position_command(
     body: PositionCommandBody,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
     try:
-        return await client.position_command(body.dict())
+        return await client.position_command(body.dict(), language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -491,15 +828,18 @@ async def position_command(
     summary="Get robot task state",
     description="Proxy to `GET /open-platform-service/v1/robot/task/state/get`.",
 )
-async def get_robot_task_state(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def get_robot_task_state(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.get_robot_task_state(sn=sn)
+        return await client.get_robot_task_state(sn=sn, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 # ---------- Recharge ---------- #
-
 
 @app.get(
     "/pudu/recharge/v1",
@@ -507,9 +847,13 @@ async def get_robot_task_state(sn: str, client: PuduClient = Depends(get_pudu_cl
     summary="Send robot to recharge (v1)",
     description="Proxy to `GET /open-platform-service/v1/recharge`.",
 )
-async def recharge_v1(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def recharge_v1(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.recharge_v1(sn=sn)
+        return await client.recharge_v1(sn=sn, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -520,15 +864,18 @@ async def recharge_v1(sn: str, client: PuduClient = Depends(get_pudu_client)):
     summary="Send robot to recharge (v2, MQTT)",
     description="Proxy to `GET /open-platform-service/v2/recharge`.",
 )
-async def recharge_v2(sn: str, client: PuduClient = Depends(get_pudu_client)):
+async def recharge_v2(
+    sn: str,
+    Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
+    client: PuduClient = Depends(get_pudu_client),
+):
     try:
-        return await client.recharge_v2(sn=sn)
+        return await client.recharge_v2(sn=sn, language=Language)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 # ---------- Callback endpoint – notifyRobotPose ---------- #
-
 
 @app.post(
     "/pudu/callback/robotPose",
@@ -541,7 +888,6 @@ async def recharge_v2(sn: str, client: PuduClient = Depends(get_pudu_client)):
     ),
 )
 async def robot_pose_callback(body: RobotPoseCallback, request: Request):
-    # Vérifier le type de callback
     if body.callback_type != "notifyRobotPose":
         raise HTTPException(status_code=400, detail="Unsupported callback_type")
 
@@ -557,10 +903,5 @@ async def robot_pose_callback(body: RobotPoseCallback, request: Request):
         pose.timestamp,
         pose.notify_timestamp,
     )
-
-    # Ici tu peux ajouter :
-    # - écriture en base
-    # - envoi vers Optima / dashboard
-    # - push vers MQTT, etc.
 
     return {"status": "ok", "sn": pose.sn}
