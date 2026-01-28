@@ -1,3 +1,4 @@
+
 # main.py
 import os
 import logging
@@ -5,7 +6,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Literal
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, Header
+from fastapi import Depends, FastAPI, HTTPException, Request, Header, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -252,7 +253,6 @@ class CustomCallBody(BaseModel):
         ...,
         description="Identifier of this calling system (e.g. 'TRASH_ROUTE_BACKEND').",
     )
-    # allow any extra fields like call_mode, mode_data, etc.
     extra: Dict[str, Any] = Field(
         default_factory=dict,
         description="Additional fields (call_mode, mode_data, shop_id, etc.).",
@@ -435,7 +435,7 @@ async def list_robots_by_device_and_group(
     ),
 )
 async def store_map_list(
-    shop_id: int,
+    shop_id: int = Query(..., description="Shop id (integer)."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -456,7 +456,7 @@ async def store_map_list(
     ),
 )
 async def list_maps(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -479,8 +479,11 @@ async def list_maps(
     ),
 )
 async def get_current_map(
-    sn: str,
-    need_element: Optional[bool] = None,
+    sn: str = Query(..., description="Robot serial number."),
+    need_element: Optional[bool] = Query(
+        default=None,
+        description="If true, include map elements in response (need_element=true).",
+    ),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -503,8 +506,8 @@ async def get_current_map(
     ),
 )
 async def get_map_detail_v2(
-    shop_id: str,
-    map_name: str,
+    shop_id: str = Query(..., description="Shop id (string as expected by Pudu API)."),
+    map_name: str = Query(..., description="Map name (URL-escaped if needed)."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -525,7 +528,7 @@ async def get_map_detail_v2(
     ),
 )
 async def list_points(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -551,7 +554,7 @@ async def list_points(
     ),
 )
 async def get_robot_position(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -695,8 +698,13 @@ async def custom_call_complete(
     ),
 )
 async def list_calls(
-    sn: str,
-    limit: Optional[int] = Field(default=10, ge=1, le=200, description="Max items to return."),
+    sn: str = Query(..., description="Robot serial number."),
+    limit: int = Query(
+        10,
+        ge=1,
+        le=200,
+        description="Max items to return (Pudu examples use 10).",
+    ),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -773,7 +781,7 @@ async def delivery_action(
     description="Proxy to `GET /open-platform-service/v2/status/get_by_sn`.",
 )
 async def get_status_by_sn(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -790,7 +798,7 @@ async def get_status_by_sn(
     description="Proxy to `GET /open-platform-service/v1/status/get_by_group_id`.",
 )
 async def get_status_by_group_id(
-    group_id: str,
+    group_id: str = Query(..., description="Robot group id."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -829,7 +837,7 @@ async def position_command(
     description="Proxy to `GET /open-platform-service/v1/robot/task/state/get`.",
 )
 async def get_robot_task_state(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -848,7 +856,7 @@ async def get_robot_task_state(
     description="Proxy to `GET /open-platform-service/v1/recharge`.",
 )
 async def recharge_v1(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
@@ -865,7 +873,7 @@ async def recharge_v1(
     description="Proxy to `GET /open-platform-service/v2/recharge`.",
 )
 async def recharge_v2(
-    sn: str,
+    sn: str = Query(..., description="Robot serial number."),
     Language: Optional[str] = Header(default=None, description=LANGUAGE_HEADER_DESC),  # noqa: N803
     client: PuduClient = Depends(get_pudu_client),
 ):
