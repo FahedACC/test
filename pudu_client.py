@@ -31,7 +31,6 @@ class PuduClient:
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
 
-        # Reuse a single async client
         self._client = httpx.AsyncClient(timeout=10.0)
 
     async def close(self) -> None:
@@ -42,15 +41,76 @@ class PuduClient:
     # PUBLIC API METHODS – HEALTH
     # ------------------------------------------------------------------
 
-    async def health_check(self) -> Dict[str, Any]:
-        """
-        Call Pudu Cloud health check endpoint.
-
-        Adjust `path` if your tenant uses a different health endpoint.
-        """
+    async def health_check(self, language: Optional[str] = None) -> Dict[str, Any]:
         path = "/data-open-platform-service/v1/api/healthCheck"
         url = f"{self.base_url}{path}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
+
+    # ------------------------------------------------------------------
+    # PUBLIC API METHODS – MAPS (NEW + UPDATED)
+    # ------------------------------------------------------------------
+
+    async def store_map_list(self, shop_id: int, language: Optional[str] = None) -> Dict[str, Any]:
+        """
+        GET /data-open-platform-service/v1/api/maps?shop_id=...
+
+        StoreMapList: list all map names under a shop (shop-level).
+        """
+        path = "/data-open-platform-service/v1/api/maps"
+        url = f"{self.base_url}{path}?shop_id={shop_id}"
+        return await self._request("GET", url, language=language)
+
+    async def list_maps(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
+        """
+        GET /map-service/v1/open/list?sn=...
+
+        AvailableMaps: list maps currently available to the robot.
+        """
+        path = "/map-service/v1/open/list"
+        url = f"{self.base_url}{path}?sn={sn}"
+        return await self._request("GET", url, language=language)
+
+    async def get_current_map(
+        self,
+        sn: str,
+        need_element: Optional[bool] = None,
+        language: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        GET /map-service/v1/open/current?sn=...&need_element=true|false
+
+        CurrentMap: current map in use by robot.
+        """
+        path = "/map-service/v1/open/current"
+        url = f"{self.base_url}{path}?sn={sn}"
+        if need_element is not None:
+            url = f"{url}&need_element={'true' if need_element else 'false'}"
+        return await self._request("GET", url, language=language)
+
+    async def get_map_detail_v2(
+        self,
+        shop_id: str,
+        map_name: str,
+        language: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        GET /map-service/v1/open/map?shop_id=...&map_name=...
+
+        GetMapDetailV2: raw map details, no unit conversion.
+        """
+        path = "/map-service/v1/open/map"
+        url = f"{self.base_url}{path}?shop_id={shop_id}&map_name={map_name}"
+        return await self._request("GET", url, language=language)
+
+    async def list_points(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
+        """
+        GET /map-service/v1/open/point?sn=...
+
+        GetCurrentMapPoints: list named points in current map.
+        """
+        path = "/map-service/v1/open/point"
+        url = f"{self.base_url}{path}?sn={sn}"
+        return await self._request("GET", url, language=language)
 
     # ------------------------------------------------------------------
     # PUBLIC API METHODS – ROBOTS
@@ -60,12 +120,8 @@ class PuduClient:
         self,
         device: Optional[str] = None,
         shop_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        GET /open-platform-service/v1/robot/group/list
-
-        List robot groups for a given device/shop.
-        """
         path = "/open-platform-service/v1/robot/group/list"
         qs_parts = []
         if device:
@@ -76,241 +132,140 @@ class PuduClient:
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{query}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
     async def list_robots_by_device_and_group(
         self,
         device: str,
         group_id: str,
+        language: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        GET /open-platform-service/v1/robot/list_by_device_and_group
-
-        List robots (SN, name, etc.) in a specific group.
-        """
         path = "/open-platform-service/v1/robot/list_by_device_and_group"
         query = f"device={device}&group_id={group_id}"
         url = f"{self.base_url}{path}?{query}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
     # ------------------------------------------------------------------
-    # PUBLIC API METHODS – MAPS
+    # PUBLIC API METHODS – ROBOT POSITION (NEW)
     # ------------------------------------------------------------------
 
-    async def list_maps(self, sn: str) -> Dict[str, Any]:
+    async def get_robot_position(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
         """
-        GET /map-service/v1/open/list
+        GET /open-platform-service/v1/robot/get_position?sn=...
 
-        Returns the list of maps available on the robot.
+        Returns current position (x,y,z) + map_name + floor.
         """
-        path = "/map-service/v1/open/list"
+        path = "/open-platform-service/v1/robot/get_position"
         url = f"{self.base_url}{path}?sn={sn}"
-        return await self._request("GET", url)
-
-    async def get_current_map(self, sn: str) -> Dict[str, Any]:
-        """
-        GET /map-service/v1/open/current
-
-        Returns the current map used by the robot.
-        """
-        path = "/map-service/v1/open/current"
-        url = f"{self.base_url}{path}?sn={sn}&need_element=true"
-
-        return await self._request("GET", url)
-
-    async def list_points(self, sn: str) -> Dict[str, Any]:
-        """
-        GET /map-service/v1/open/point
-
-        Returns the list of named map points (tables, return points, waypoints, etc.)
-        for the current map.
-        """
-        path = "/map-service/v1/open/point"
-        url = f"{self.base_url}{path}?sn={sn}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
     # ------------------------------------------------------------------
     # PUBLIC API METHODS – MISSIONS (TASKS)
     # ------------------------------------------------------------------
 
-    async def create_task_errand(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        POST /open-platform-service/v1/task_errand
-
-        Dispatch one or more errands to a robot.
-
-        `body` must follow Pudu's schema:
-          {
-            "sn": "ROBOT_SN",
-            "payload": {
-              "tasks": [
-                {
-                  "task_name": "...",
-                  "task_desc": "...",
-                  "point_list": [
-                    { "map_name": "...", "point": "..." },
-                    ...
-                  ]
-                }
-              ]
-            }
-          }
-        """
+    async def create_task_errand(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/task_errand"
         url = f"{self.base_url}{path}"
-        return await self._request("POST", url, body)
+        return await self._request("POST", url, body, language=language)
 
-    async def create_transport_task(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        POST /open-platform-service/v1/transport_task
-
-        Creates an advanced transport/delivery task:
-        - start point
-        - multiple destinations
-        - priority, reminders, etc.
-
-        `body` must follow Pudu's schema:
-          {
-            "sn": "ROBOT_SN",
-            "payload": { ... }
-          }
-        """
+    async def create_transport_task(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/transport_task"
         url = f"{self.base_url}{path}"
-        return await self._request("POST", url, body)
+        return await self._request("POST", url, body, language=language)
 
-    async def custom_call(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        POST /open-platform-service/v1/custom_call
-
-        Call the robot to a specific map point and optionally display content
-        on the screen (image, QR, video, confirmation, etc.).
-
-        Typical body:
-          {
-            "sn": "ROBOT_SN",
-            "map_name": "...",
-            "point": "...",
-            "call_device_name": "TRASH_ROUTE_BACKEND",
-            "call_mode": "CALL",
-            "mode_data": { ... }
-          }
-        """
+    async def custom_call(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/custom_call"
         url = f"{self.base_url}{path}"
-        return await self._request("POST", url, body)
+        return await self._request("POST", url, body, language=language)
 
-    async def custom_call_cancel(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        POST /open-platform-service/v1/custom_call/cancel
-
-        Cancel an ongoing custom_call task.
-
-        Body:
-          {
-            "task_id": "...",
-            "call_device_name": "TRASH_ROUTE_BACKEND"
-          }
-        """
+    async def custom_call_cancel(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/custom_call/cancel"
         url = f"{self.base_url}{path}"
-        return await self._request("POST", url, body)
+        return await self._request("POST", url, body, language=language)
 
-    async def custom_call_complete(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        POST /open-platform-service/v1/custom_call/complete
-
-        Mark a custom_call as complete, and optionally define `next_call_task`
-        to chain another call.
-
-        Body:
-          {
-            "task_id": "...",
-            "call_device_name": "TRASH_ROUTE_BACKEND",
-            "next_call_task": { ... }   # optional
-          }
-        """
+    async def custom_call_complete(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/custom_call/complete"
         url = f"{self.base_url}{path}"
-        return await self._request("POST", url, body)
+        return await self._request("POST", url, body, language=language)
+
+    async def list_calls(
+        self,
+        sn: str,
+        limit: Optional[int] = 10,
+        language: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        GET /open-platform-service/v1/call/list?sn=...&limit=...
+
+        CallList: list call tasks for robot.
+        """
+        path = "/open-platform-service/v1/call/list"
+        url = f"{self.base_url}{path}?sn={sn}"
+        if limit is not None:
+            url = f"{url}&limit={limit}"
+        return await self._request("GET", url, language=language)
 
     # ------------------------------------------------------------------
-    # PUBLIC API METHODS – STATUS & POSITION
+    # PUBLIC API METHODS – DELIVERY (NEW)
     # ------------------------------------------------------------------
 
-    async def get_status_by_sn(self, sn: str) -> Dict[str, Any]:
+    async def delivery_task(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         """
-        GET /open-platform-service/v2/status/get_by_sn
+        POST /open-platform-service/v1/delivery_task
 
-        Detailed state for one robot (online, battery, run_state, etc.).
+        Send a delivery task to a robot (multi-tray).
         """
+        path = "/open-platform-service/v1/delivery_task"
+        url = f"{self.base_url}{path}"
+        return await self._request("POST", url, body, language=language)
+
+    async def delivery_action(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
+        """
+        POST /open-platform-service/v1/delivery_action
+
+        Operate delivery tasks: START/COMPLETE/CANCEL_ALL_DELIVERY/PAUSE/RESUME
+        """
+        path = "/open-platform-service/v1/delivery_action"
+        url = f"{self.base_url}{path}"
+        return await self._request("POST", url, body, language=language)
+
+    # ------------------------------------------------------------------
+    # PUBLIC API METHODS – STATUS & POSITION (existing)
+    # ------------------------------------------------------------------
+
+    async def get_status_by_sn(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v2/status/get_by_sn"
         url = f"{self.base_url}{path}?sn={sn}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
-    async def get_status_by_group_id(self, group_id: str) -> Dict[str, Any]:
-        """
-        GET /open-platform-service/v1/status/get_by_group_id
-
-        Status + position (x, y, yaw) for each robot in a group.
-        """
+    async def get_status_by_group_id(self, group_id: str, language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/status/get_by_group_id"
         url = f"{self.base_url}{path}?group_id={group_id}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
-    async def position_command(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        POST /open-platform-service/v1/position_command
-
-        Ask a robot to report its position periodically.
-
-        Body:
-          {
-            "sn": "ROBOT_SN",
-            "payload": {
-              "interval": 5,
-              "times": 100,
-              "source": "openAPI"   # optionnel, ignoré si non utilisé par Pudu
-            }
-          }
-        """
+    async def position_command(self, body: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/position_command"
         url = f"{self.base_url}{path}"
-        return await self._request("POST", url, body)
+        return await self._request("POST", url, body, language=language)
 
-    async def get_robot_task_state(self, sn: str) -> Dict[str, Any]:
-        """
-        GET /open-platform-service/v1/robot/task/state/get
-
-        Returns list of current tasks running on the robot and their states.
-        """
+    async def get_robot_task_state(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/robot/task/state/get"
         url = f"{self.base_url}{path}?sn={sn}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
     # ------------------------------------------------------------------
     # PUBLIC API METHODS – RECHARGE
     # ------------------------------------------------------------------
 
-    async def recharge_v1(self, sn: str) -> Dict[str, Any]:
-        """
-        GET /open-platform-service/v1/recharge
-
-        Send robot to its charging/home point via Cloud.
-        """
+    async def recharge_v1(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v1/recharge"
         url = f"{self.base_url}{path}?sn={sn}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
-    async def recharge_v2(self, sn: str) -> Dict[str, Any]:
-        """
-        GET /open-platform-service/v2/recharge
-
-        Same as v1 but uses MQTT connectivity and returns more detailed errors.
-        """
+    async def recharge_v2(self, sn: str, language: Optional[str] = None) -> Dict[str, Any]:
         path = "/open-platform-service/v2/recharge"
         url = f"{self.base_url}{path}?sn={sn}"
-        return await self._request("GET", url)
+        return await self._request("GET", url, language=language)
 
     # ------------------------------------------------------------------
     # INTERNAL SIGNED REQUEST
@@ -321,6 +276,8 @@ class PuduClient:
         method: str,
         url: str,
         body: Optional[Dict[str, Any]] = None,
+        *,
+        language: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generic signed request to Pudu Cloud:
@@ -328,6 +285,9 @@ class PuduClient:
         - Normalizes path + query
         - Computes HMAC-SHA1 signature
         - Sends request via httpx
+
+        Note: We sign ONLY "x-date" (per your current implementation).
+        We can still send extra headers like "Language" without including them in signature.
         """
         method = method.upper()
         body = body or {}
@@ -352,15 +312,12 @@ class PuduClient:
         body_json = ""
 
         if method == "POST":
-            # Stable JSON encoding (no unnecessary spaces)
             body_json = json.dumps(body, separators=(",", ":"))
             md5_hex = hashlib.md5(body_json.encode("utf-8")).hexdigest()
             content_md5 = base64.b64encode(md5_hex.encode("utf-8")).decode("utf-8")
 
-        # GMT date header
         x_date = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-        # Build signing string
         signing_str = "\n".join(
             [
                 f"x-date: {x_date}",
@@ -372,7 +329,6 @@ class PuduClient:
             ]
         )
 
-        # HMAC-SHA1 signature
         raw_sig = hmac.new(
             self.api_secret.encode("utf-8"),
             msg=signing_str.encode("utf-8"),
@@ -387,13 +343,17 @@ class PuduClient:
             f'signature="{sig_b64}"'
         )
 
-        headers = {
+        headers: Dict[str, str] = {
             "Host": host or "",
             "Accept": accept,
             "Content-Type": content_type,
             "x-date": x_date,
             "Authorization": authorization,
         }
+
+        # Optional Language header (Pudu docs: defaults to Chinese if omitted)
+        if language:
+            headers["Language"] = language
 
         if method == "GET":
             resp = await self._client.get(url, headers=headers)
